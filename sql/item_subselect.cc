@@ -348,6 +348,17 @@ end:
 }
 
 
+bool Item_subselect::unknown_splocal_processor(void *argument)
+{
+  SELECT_LEX *sl= unit->first_select();
+  if (sl->top_join_list.elements)
+    return 0;
+  if (sl->tvc && sl->tvc->walk_values(&Item::unknown_splocal_processor, false, argument))
+    return true;
+  return walk_subquery_items(&Item::unknown_splocal_processor, false, argument);
+}
+
+
 bool Item_subselect::enumerate_field_refs_processor(void *arg)
 {
   List_iterator<Ref_to_outside> it(upper_refs);
@@ -679,39 +690,47 @@ bool Item_subselect::walk(Item_processor processor, bool walk_subquery,
     return (this->*processor)(argument);
   }
 
-  if (walk_subquery)
+  if (walk_subquery && walk_subquery_items(processor, true, argument))
+    return true;
+
+  return (this->*processor)(argument);
+}
+
+
+bool Item_subselect::walk_subquery_items(Item_processor processor,
+                                         bool walk_subquery,
+                                         void *argument)
+{
+  for (SELECT_LEX *lex= unit->first_select(); lex; lex= lex->next_select())
   {
-    for (SELECT_LEX *lex= unit->first_select(); lex; lex= lex->next_select())
+    List_iterator<Item> li(lex->item_list);
+    Item *item;
+    ORDER *order;
+
+    if (lex->where && (lex->where)->walk(processor, walk_subquery, argument))
+      return 1;
+    if (lex->having && (lex->having)->walk(processor, walk_subquery,
+                                           argument))
+      return 1;
+    /* TODO: why does this walk WHERE/HAVING but not ON expressions of outer joins? */
+
+    while ((item=li++))
     {
-      List_iterator<Item> li(lex->item_list);
-      Item *item;
-      ORDER *order;
-
-      if (lex->where && (lex->where)->walk(processor, walk_subquery, argument))
+      if (item->walk(processor, walk_subquery, argument))
         return 1;
-      if (lex->having && (lex->having)->walk(processor, walk_subquery,
-                                             argument))
+    }
+    for (order= lex->order_list.first ; order; order= order->next)
+    {
+      if ((*order->item)->walk(processor, walk_subquery, argument))
         return 1;
-      /* TODO: why does this walk WHERE/HAVING but not ON expressions of outer joins? */
-
-      while ((item=li++))
-      {
-        if (item->walk(processor, walk_subquery, argument))
-          return 1;
-      }
-      for (order= lex->order_list.first ; order; order= order->next)
-      {
-        if ((*order->item)->walk(processor, walk_subquery, argument))
-          return 1;
-      }
-      for (order= lex->group_list.first ; order; order= order->next)
-      {
-        if ((*order->item)->walk(processor, walk_subquery, argument))
-          return 1;
-      }
+    }
+    for (order= lex->group_list.first ; order; order= order->next)
+    {
+      if ((*order->item)->walk(processor, walk_subquery, argument))
+        return 1;
     }
   }
-  return (this->*processor)(argument);
+  return false;
 }
 
 

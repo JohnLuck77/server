@@ -1926,6 +1926,7 @@ public:
   virtual bool cleanup_excluding_const_fields_processor (void *arg)
   { return cleanup_processor(arg); }
   virtual bool collect_item_field_processor(void *arg) { return 0; }
+  virtual bool unknown_splocal_processor(void *arg) { return 0; }
   virtual bool collect_outer_ref_processor(void *arg) {return 0; }
   virtual bool check_inner_refs_processor(void *arg) { return 0; }
   virtual bool find_item_in_field_list_processor(void *arg) { return 0; }
@@ -3272,6 +3273,8 @@ protected:
   LEX_CSTRING orig_table_name;
   LEX_CSTRING orig_field_name;
 
+  void undeclared_spvar_error() const;
+
 public:
   Name_resolution_context *context;
   LEX_CSTRING db_name;
@@ -3488,6 +3491,7 @@ public:
   Item *get_tmp_table_item(THD *thd);
   bool find_not_null_fields(table_map allowed);
   bool collect_item_field_processor(void * arg);
+  bool unknown_splocal_processor(void *arg);
   bool add_field_to_set_processor(void * arg);
   bool find_item_in_field_list_processor(void *arg);
   bool register_field_in_read_map(void *arg);
@@ -5326,14 +5330,8 @@ public:
     return ref ? (*ref)->get_typelib() : NULL;
   }
 
-  bool walk(Item_processor processor, bool walk_subquery, void *arg)
-  { 
-    if (ref && *ref)
-      return (*ref)->walk(processor, walk_subquery, arg) ||
-             (this->*processor)(arg); 
-    else
-      return FALSE;
-  }
+  bool unknown_splocal_processor(void *arg);
+  bool walk(Item_processor processor, bool walk_subquery, void *arg);
   Item* transform(THD *thd, Item_transformer, uchar *arg);
   Item* compile(THD *thd, Item_analyzer analyzer, uchar **arg_p,
                 Item_transformer transformer, uchar *arg_t);
@@ -6588,6 +6586,7 @@ private:
   */
   bool read_only;
 public:
+  bool unknown_splocal_processor(void *arg) { return false; }
   bool check_vcol_func_processor(void *arg);
 };
 
