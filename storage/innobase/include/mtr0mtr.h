@@ -591,6 +591,7 @@ public:
   void clear_freed_ranges()
   {
     m_freed_ranges.clear();
+    m_freed_in_system_tablespace= 0;
   }
 private:
   /** Log a write of a byte string to a page.

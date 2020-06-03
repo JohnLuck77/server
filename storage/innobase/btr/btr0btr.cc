@@ -957,20 +957,6 @@ void btr_page_get_father(dict_index_t* index, buf_block_t* block, mtr_t* mtr,
 /** PAGE_INDEX_ID value for freed index B-trees */
 constexpr index_id_t	BTR_FREED_INDEX_ID = 0;
 
-/** Invalidate PAGE_INDEX_ID for the root page.
-@param[in,out]	block	index root page
-@param[in,out]	mtr	mini-transaction */
-static void btr_invalidate_index_id(buf_block_t *block, mtr_t *mtr)
-{
-  constexpr uint16_t field= PAGE_HEADER + PAGE_INDEX_ID;
-  byte *page_index_id= my_assume_aligned<2>(field + block->frame);
-
-  if (mtr->write<8,mtr_t::MAYBE_NOP>(*block, page_index_id,
-                                     BTR_FREED_INDEX_ID) &&
-      UNIV_LIKELY_NULL(block->page.zip.data))
-    memcpy_aligned<2>(&block->page.zip.data[field], page_index_id, 8);
-}
-
 /** Free a B-tree root page. btr_free_but_not_root() must already
 have been called.
 In a persistent tablespace, the caller must invoke fsp_init_file_page()
@@ -1105,9 +1091,6 @@ btr_create(
 				 PAGE_HEADER + PAGE_BTR_SEG_LEAF, mtr)) {
 			/* Not enough space for new segment, free root
 			segment before return. */
-			if (!index || !index->table->is_temporary())
-			  btr_invalidate_index_id(block, mtr);
-
 			btr_free_root(block, mtr);
 			return(FIL_NULL);
 		}
@@ -1258,7 +1241,6 @@ btr_free_if_exists(
 
 	btr_free_but_not_root(root, mtr->get_log_mode());
 	mtr->set_named_space_id(page_id.space());
-	btr_invalidate_index_id(root, mtr);
 	btr_free_root(root, mtr);
 }
 

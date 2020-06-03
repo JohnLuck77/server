@@ -4519,146 +4519,130 @@ FILE_PAGE (the other is buf_page_get_gen).
 @param[in,out]	mtr		mini-transaction
 @return pointer to the block, page bufferfixed */
 buf_block_t*
-buf_page_create(
-	fil_space_t		*space,
-	uint32_t		offset,
-	ulint			zip_size,
-	mtr_t*			mtr)
+buf_page_create(fil_space_t *space, uint32_t offset,
+                ulint zip_size, mtr_t *mtr)
 {
-	buf_frame_t*	frame;
-	buf_block_t*	block;
-	buf_block_t*	free_block	= NULL;
-	rw_lock_t*	hash_lock;
-	page_id_t	page_id(space->id, offset);
+  buf_frame_t *frame;
+  buf_block_t *block;
+  buf_block_t *free_block= NULL;
+  rw_lock_t *hash_lock;
+  page_id_t page_id(space->id, offset);
 
-	ut_ad(mtr->is_active());
-	ut_ad(page_id.space() != 0 || !zip_size);
+  ut_ad(mtr->is_active());
+  ut_ad(page_id.space() != 0 || !zip_size);
 
-	free_block = buf_LRU_get_free_block();
+  free_block = buf_LRU_get_free_block();
+  mutex_enter(&buf_pool.mutex);
+  hash_lock = buf_page_hash_lock_get(page_id);
+  rw_lock_x_lock(hash_lock);
 
-	mutex_enter(&buf_pool.mutex);
+  block = (buf_block_t*) buf_page_hash_get_low(page_id);
 
-	hash_lock = buf_page_hash_lock_get(page_id);
-	rw_lock_x_lock(hash_lock);
+  if (block && buf_page_in_file(&block->page) &&
+      !buf_pool_watch_is_sentinel(&block->page))
+  {
+    /* Page can be found in buf_pool */
+    mutex_exit(&buf_pool.mutex);
+    rw_lock_x_unlock(hash_lock);
 
-	block = (buf_block_t*) buf_page_hash_get_low(page_id);
-
-	if (block
-	    && buf_page_in_file(&block->page)
-	    && !buf_pool_watch_is_sentinel(&block->page)) {
-		/* Page can be found in buf_pool */
-		mutex_exit(&buf_pool.mutex);
-		rw_lock_x_unlock(hash_lock);
-
-		buf_block_free(free_block);
+    buf_block_free(free_block);
 #ifdef BTR_CUR_HASH_ADAPT
-		if (block->page.state == BUF_BLOCK_FILE_PAGE
-		    && UNIV_LIKELY_NULL(block->index)) {
-			btr_search_drop_page_hash_index(block);
-		}
+    if (block->page.state == BUF_BLOCK_FILE_PAGE &&
+        UNIV_LIKELY_NULL(block->index))
+      btr_search_drop_page_hash_index(block);
 #endif /* BTR_CUR_HASH_ADAPT */
 
-		if (!recv_recovery_is_on()) {
-			/* FIXME: Remove the redundant lookup and avoid
-			the unnecessary invocation of buf_zip_decompress().
-			We may have to convert buf_page_t to buf_block_t,
-			but we are going to initialize the page. */
-			space->free_page(offset, false);
-			return buf_page_get_gen(page_id, zip_size, RW_NO_LATCH,
-						block, BUF_GET_POSSIBLY_FREED,
-						__FILE__, __LINE__, mtr);
-		}
+    if (!recv_recovery_is_on())
+    {
+      /* FIXME: Remove the redundant lookup and avoid
+      the unnecessary invocation of buf_zip_decompress().
+      We may have to convert buf_page_t to buf_block_t,
+      but we are going to initialize the page. */
+      space->free_page(offset, false);
+      return buf_page_get_gen(page_id, zip_size, RW_NO_LATCH,
+                              block, BUF_GET_POSSIBLY_FREED,
+                              __FILE__, __LINE__, mtr);
+    }
 
-		mutex_exit(&recv_sys.mutex);
-		block = buf_page_get_with_no_latch(page_id, zip_size, mtr);
-		mutex_enter(&recv_sys.mutex);
-		return block;
-	}
+    mutex_exit(&recv_sys.mutex);
+    block = buf_page_get_with_no_latch(page_id, zip_size, mtr);
+    mutex_enter(&recv_sys.mutex);
+    return block;
+  }
 
-	/* If we get here, the page was not in buf_pool: init it there */
+  /* If we get here, the page was not in buf_pool: init it there */
+  DBUG_PRINT("ib_buf", ("create page %u:%u",
+                        page_id.space(), page_id.page_no()));
 
-	DBUG_PRINT("ib_buf", ("create page %u:%u",
-			      page_id.space(), page_id.page_no()));
+  block = free_block;
+  buf_page_mutex_enter(block);
+  buf_page_init(page_id, zip_size, block);
+  rw_lock_x_unlock(hash_lock);
 
-	block = free_block;
+  /* The block must be put to the LRU list */
+  buf_LRU_add_block(&block->page, FALSE);
+  buf_block_buf_fix_inc(block, __FILE__, __LINE__);
+  buf_pool.stat.n_pages_created++;
 
-	buf_page_mutex_enter(block);
+  if (zip_size)
+  {
+    /* Prevent race conditions during buf_buddy_alloc(),
+    which may release and reacquire buf_pool.mutex,
+    by IO-fixing and X-latching the block. */
 
-	buf_page_init(page_id, zip_size, block);
+    buf_page_set_io_fix(&block->page, BUF_IO_READ);
+    rw_lock_x_lock(&block->lock);
 
-	rw_lock_x_unlock(hash_lock);
+    buf_page_mutex_exit(block);
+    /* buf_pool.mutex may be released and reacquired by buf_buddy_alloc().
+    Thus, we must release block->mutex in order not to break the
+    latching order in the reacquisition of buf_pool.mutex. We also must
+    defer this operation until after the block descriptor has been added
+    to buf_pool.LRU and buf_pool.page_hash. */
+    block->page.zip.data = buf_buddy_alloc(zip_size);
+    buf_page_mutex_enter(block);
 
-	/* The block must be put to the LRU list */
-	buf_LRU_add_block(&block->page, FALSE);
+    /* To maintain the invariant
+    block->in_unzip_LRU_list == buf_page_belongs_to_unzip_LRU(&block->page)
+    we have to add this block to unzip_LRU after block->page.zip.data
+    is set. */
+    ut_ad(buf_page_belongs_to_unzip_LRU(&block->page));
+    buf_unzip_LRU_add_block(block, FALSE);
 
-	buf_block_buf_fix_inc(block, __FILE__, __LINE__);
-	buf_pool.stat.n_pages_created++;
+    buf_page_set_io_fix(&block->page, BUF_IO_NONE);
+    rw_lock_x_unlock(&block->lock);
+  }
 
-	if (zip_size) {
-		/* Prevent race conditions during buf_buddy_alloc(),
-		which may release and reacquire buf_pool.mutex,
-		by IO-fixing and X-latching the block. */
+  mutex_exit(&buf_pool.mutex);
+  mtr_memo_push(mtr, block, MTR_MEMO_BUF_FIX);
+  buf_page_set_accessed(&block->page);
+  buf_page_mutex_exit(block);
 
-		buf_page_set_io_fix(&block->page, BUF_IO_READ);
-		rw_lock_x_lock(&block->lock);
+  /* Delete possible entries for the page from the insert buffer:
+  such can exist if the page belonged to an index which was dropped */
+  if (!recv_recovery_is_on())
+    ibuf_merge_or_delete_for_page(NULL, page_id, zip_size, true);
 
-		buf_page_mutex_exit(block);
-		/* buf_pool.mutex may be released and reacquired by
-		buf_buddy_alloc().  Thus, we must release block->mutex
-		in order not to break the latching order in
-		the reacquisition of buf_pool.mutex.  We also must
-		defer this operation until after the block descriptor
-		has been added to buf_pool.LRU and buf_pool.page_hash. */
-		block->page.zip.data = buf_buddy_alloc(zip_size);
-		buf_page_mutex_enter(block);
+  frame = block->frame;
+  static_assert(FIL_PAGE_PREV % 8 == 0, "alignment");
+  static_assert(FIL_PAGE_PREV + 4 == FIL_PAGE_NEXT, "adjacent");
+  memset_aligned<8>(frame + FIL_PAGE_PREV, 0xff, 8);
+  mach_write_to_2(frame + FIL_PAGE_TYPE, FIL_PAGE_TYPE_ALLOCATED);
 
-		/* To maintain the invariant
-		block->in_unzip_LRU_list
-		== buf_page_belongs_to_unzip_LRU(&block->page)
-		we have to add this block to unzip_LRU after
-		block->page.zip.data is set. */
-		ut_ad(buf_page_belongs_to_unzip_LRU(&block->page));
-		buf_unzip_LRU_add_block(block, FALSE);
+  /* FIL_PAGE_FILE_FLUSH_LSN_OR_KEY_VERSION is only used on the
+  following pages:
+  (1) The first page of the InnoDB system tablespace (page 0:0)
+  (2) FIL_RTREE_SPLIT_SEQ_NUM on R-tree pages
+  (3) key_version on encrypted pages (not page 0:0) */
 
-		buf_page_set_io_fix(&block->page, BUF_IO_NONE);
-		rw_lock_x_unlock(&block->lock);
-	}
-
-	mutex_exit(&buf_pool.mutex);
-
-	mtr_memo_push(mtr, block, MTR_MEMO_BUF_FIX);
-
-	buf_page_set_accessed(&block->page);
-
-	buf_page_mutex_exit(block);
-
-	/* Delete possible entries for the page from the insert buffer:
-	such can exist if the page belonged to an index which was dropped */
-	if (!recv_recovery_is_on()) {
-		ibuf_merge_or_delete_for_page(NULL, page_id, zip_size, true);
-	}
-
-	frame = block->frame;
-
-	static_assert(FIL_PAGE_PREV % 8 == 0, "alignment");
-	static_assert(FIL_PAGE_PREV + 4 == FIL_PAGE_NEXT, "adjacent");
-	memset_aligned<8>(frame + FIL_PAGE_PREV, 0xff, 8);
-	mach_write_to_2(frame + FIL_PAGE_TYPE, FIL_PAGE_TYPE_ALLOCATED);
-
-	/* FIL_PAGE_FILE_FLUSH_LSN_OR_KEY_VERSION is only used on the
-	following pages:
-	(1) The first page of the InnoDB system tablespace (page 0:0)
-	(2) FIL_RTREE_SPLIT_SEQ_NUM on R-tree pages
-	(3) key_version on encrypted pages (not page 0:0) */
-
-	memset(frame + FIL_PAGE_FILE_FLUSH_LSN_OR_KEY_VERSION, 0, 8);
-	static_assert(FIL_PAGE_LSN % 8 == 0, "alignment");
-	memset_aligned<8>(frame + FIL_PAGE_LSN, 0, 8);
+  memset(frame + FIL_PAGE_FILE_FLUSH_LSN_OR_KEY_VERSION, 0, 8);
+  static_assert(FIL_PAGE_LSN % 8 == 0, "alignment");
+  memset_aligned<8>(frame + FIL_PAGE_LSN, 0, 8);
 
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
-	if (!(++buf_dbg_counter % 5771)) buf_pool.validate();
+  if (!(++buf_dbg_counter % 5771)) buf_pool.validate();
 #endif /* UNIV_DEBUG || UNIV_BUF_DEBUG */
-	return(block);
+  return(block);
 }
 
 /********************************************************************//**

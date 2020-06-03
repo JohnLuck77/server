@@ -1378,6 +1378,7 @@ buf_flush_check_neighbor(
 	return(ret);
 }
 
+#if 0
 /** Get the freed page ranges from fil_space_t and store it in
 local freed range variable. This function protected by freed_mutex
 @param[in,out]	space		tablespace which contains freed ranges
@@ -1395,14 +1396,29 @@ static range_set<uint32_t> buf_flush_get_freed_pages(fil_space_t *space)
   std::lock_guard<std::mutex> freed_lock(space->freed_range_mutex);
   return std::move(space->freed_ranges);
 }
+#endif
 
 /** Write punch-hole or zeroes of the freed ranges when
 innodb_immediate_scrub_data_uncompressed from the freed ranges.
 @param[in]	space		tablespace which contains freed ranges
 @param[in]	freed_ranges	freed ranges of the page to be flushed */
-static void buf_flush_freed_pages(fil_space_t *space,
-				  range_set<uint32_t> freed_ranges)
+static void buf_flush_freed_pages(fil_space_t *space)
 {
+  ut_ad(space != NULL);
+  if (!srv_immediate_scrub_data_uncompressed && !space->is_compressed())
+    return;
+  lsn_t flush_to_disk_lsn= log_sys.get_flushed_lsn();
+
+  std::unique_lock<std::mutex> freed_lock(space->freed_range_mutex);
+  if (space->freed_ranges.empty()
+      || flush_to_disk_lsn < space->get_last_freed_lsn())
+  {
+    freed_lock.unlock();
+    return;
+  }
+
+  range_set<uint32_t> freed_ranges(space->freed_ranges);
+  freed_lock.unlock();
   const bool punch_hole=
 #if defined(HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE) || defined(_WIN32)
     space->is_compressed() ||
@@ -1450,11 +1466,8 @@ buf_flush_try_neighbors(
 		return 0;
 	}
 
-	if (flush_type == BUF_FLUSH_LIST)
-	{
-            /* Flush the freed ranges while flushing the neighbors */
-            buf_flush_freed_pages(space, buf_flush_get_freed_pages(space));
-	}
+        /* Flush the freed ranges while flushing the neighbors */
+        buf_flush_freed_pages(space);
 
 	if (UT_LIST_GET_LEN(buf_pool.LRU) < BUF_LRU_OLD_MIN_LEN
 	    || !srv_flush_neighbors || !space->is_rotational()) {

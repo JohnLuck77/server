@@ -37,8 +37,8 @@ Created 10/25/1995 Heikki Tuuri
 #include "log0recv.h"
 #include "dict0types.h"
 #include "ilist.h"
-# include <set>
-# include <mutex>
+#include <set>
+#include <mutex>
 
 struct unflushed_spaces_tag_t;
 struct rotation_list_tag_t;
@@ -101,7 +101,11 @@ private:
 
 public:
   range_set() {}
-  range_set(range_set_t<T>& range_v):ranges(std::move(range_v.ranges)) {}
+  range_set(range_set<T>& o):ranges(std::move(o.ranges))
+  {
+    o.clear();
+  }
+  range_set(const range_set<T>& o) {}
   /** Merge the current range with previous range.
   @param[in] range	range to be merged
   @param[in] prev_range	range to be merged with next */
@@ -236,6 +240,7 @@ new_range:
     add_range(new_range);
   }
 
+  ulint size() { return ranges.size(); }
   void clear() { ranges.clear(); }
   bool empty() const { return ranges.empty(); }
   typename range_set_t<T>::iterator begin() { return ranges.begin(); }

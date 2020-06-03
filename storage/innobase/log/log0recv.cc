@@ -552,18 +552,15 @@ struct file_name_t {
 		status(deleted ? DELETED: NORMAL),
 		size(0) {}
 
-	/** Add the freed pages */
-	void add_freed_page(uint32_t page_no)
-	{
-	  freed_ranges.add_value(page_no);
-	}
+  /** Add the freed pages */
+  void add_freed_page(uint32_t page_no) { freed_ranges.add_value(page_no); }
 
-	/** Remove the freed pages */
-	void remove_freed_page(uint32_t page_no)
-	{
-	  if (freed_ranges.empty()) return;
-	  freed_ranges.remove_value(page_no);
-	}
+  /** Remove the freed pages */
+  void remove_freed_page(uint32_t page_no)
+  {
+    if (freed_ranges.empty()) return;
+    freed_ranges.remove_value(page_no);
+  }
 };
 
 /** Map of dirty tablespaces during recovery */
