@@ -1,0 +1,83 @@
+#
+# Test different combinations of doing DROP TABLE/SEQUENCE/VIEW
+#
+
+SET @save_default_engine= @@DEFAULT_STORAGE_ENGINE;
+SET default_storage_engine=myisam;
+let $DATADIR= `select @@datadir`;
+
+# Create tables t1,t2, sequences s1,s2 and views v1,v2
+let $create_option="";
+--source drop_combinations.inc
+
+--echo # Drop tables
+
+--error 1051
+drop table t1,t2,t3;
+--source drop_combinations.inc
+--error 1051
+drop table t1,t3,t2;
+--source drop_combinations.inc
+--error 1051
+drop table t1,t4,t2,t3;
+--source drop_combinations.inc
+drop table t1,s1,s2,t2;
+--source drop_combinations.inc
+--error 1051
+drop table t1,v1,v2,t2;
+--source drop_combinations.inc
+--error 1051
+drop table v1,s1,s2,v2,t2;
+--remove_file $DATADIR/test/t1.MAD
+drop table t1,s1,v1,t3,t4;
+drop table s2,v2,t2,t1;
+--source drop_combinations.inc
+drop table s1,v1,s2,v2;
+--source drop_combinations.inc
+
+--echo # Drop sequences
+
+--error 1051
+drop sequence s1,s2,s3;
+--source drop_combinations.inc
+drop sequence s1,s3,s2;
+--source drop_combinations.inc
+drop sequence s1,s4,s2,s3;
+--source drop_combinations.inc
+drop sequence s1,t1,t2,s2;
+--source drop_combinations.inc
+drop sequence s1,v1,v2,s2;
+--source drop_combinations.inc
+drop sequence v1,t1,t2,v2,s2;
+--remove_file $DATADIR/test/s1.MAD
+drop sequence s1,t1,v1,t3,s4;
+drop sequence t2,v2,s2,s1;
+--source drop_combinations.inc
+drop sequence t1,v1,t2,v2;
+--source drop_combinations.inc
+
+--echo # Drop views
+
+drop view v1,v2,v3;
+--source drop_combinations.inc
+drop view v1,v3,v2;
+--source drop_combinations.inc
+drop view v1,v4,v2,v3;
+--source drop_combinations.inc
+drop view v1,t1,t2,v2;
+--source drop_combinations.inc
+drop view v1,s1,s2,v2;
+--source drop_combinations.inc
+drop view s1,t1,t2,s2,v2;
+--remove_file $DATADIR/test/v1.MAD
+drop view v1,t1,s1,t3,v4;
+drop view t2,s2,v2,v1;
+--source drop_combinations.inc
+drop view t1,s1,t2,s2;
+--source drop_combinations.inc
+
+--echo # cleanup
+drop table if exists t1,t2;
+drop sequence if exists s1,s2;
+drop view if exists v1,v2;
+SET default_storage_engine=@save_default_engine;
